@@ -1,0 +1,402 @@
+
+import UIKit
+import GoogleMaps
+import JJFloatingActionButton
+
+class TrackViewController: UIViewController,GMSMapViewDelegate {
+    
+    @IBOutlet weak var googleView: GMSMapView!
+    @IBOutlet weak var speedButton: UIButton!
+    
+    @IBOutlet weak var playPauseButton: UIButton!
+    var gameTimer: Timer?
+    var lcoationArray = [ShiftUserLocation]()
+    var indexValue:Int = 0
+    var trackingSpeed = 0.5
+    let polygon = GMSPolygon()
+    var marker = GMSMarker()
+    var allMarker = [GMSMarker]()
+    var inTimePath = GMSMutablePath()
+    var outTimePath = GMSMutablePath()
+    var inTimePolyline = GMSPolyline()
+    var outTimePolyline = GMSPolyline()
+    
+    var selectedDate: String = ""
+    var selectedShiftId: String = ""
+    var locationId: String = ""
+    var locationData: shiftDetail!
+    var playPauseBtnItem: JJActionItem!
+    var isForLive:Bool = false
+    
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        
+        if isForLive {
+            
+            setupMapview()
+            showStaticData()
+            
+        } else {
+            addFloatingButton()
+            self.title = selectedDate
+            getloctionData()
+        }
+        
+        
+
+    }
+    
+    func addFloatingButton() {
+        let actionButton = JJFloatingActionButton()
+        actionButton.buttonImage = UIImage(named: "more")
+        actionButton.buttonColor = AppColor.themeButtonColor
+        let item  = actionButton.addItem(title: "Fast Forward", image: UIImage(named: "speed")) { item in
+            self.openActionsheet()
+        }
+        
+        item.buttonColor  = AppColor.themeButtonColor
+        let item1 =   actionButton.addItem(title: "Restart", image: UIImage(named: "Refresh")) { item in
+            self.restartButtonClicked(UIButton())
+        }
+        item1.buttonColor  = AppColor.themeButtonColor
+ 
+ 
+        playPauseBtnItem = actionButton.addItem(title: "Pause", image: UIImage(named: "pause")) { item in
+            self.playPauseButtonClicked(self.playPauseButton)
+        }
+        
+        
+        playPauseBtnItem.buttonColor  = AppColor.themeButtonColor
+        
+        view.addSubview(actionButton)
+        actionButton.translatesAutoresizingMaskIntoConstraints = false
+        actionButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -10).isActive = true
+        actionButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -80).isActive = true
+
+    }
+    
+    //MARK: - Functions
+    func showStaticData() {
+        if let path = Bundle.main.path(forResource: "app", ofType: "json") {
+            do {
+                let data = try Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe)
+                let jsonResult = try JSONSerialization.jsonObject(with: data, options: .mutableLeaves)
+                if let jsonResult = jsonResult as? [[String:Any]] {
+                    print(jsonResult)
+                    let tmp = jsonResult.map {ShiftUserLocation.init($0 as KeyValue)}
+                    
+                    self.lcoationArray =  tmp.sorted(by: { Double($0!.timestamp!)  > Double($1!.timestamp!)}) as! [ShiftUserLocation]
+                    self.lcoationArray = self.lcoationArray.reversed()
+                    
+                    self.gameTimer  = Timer.scheduledTimer(timeInterval: 0.05, target: self, selector: #selector(self.showLiveTrack), userInfo: nil, repeats: true)
+                }
+            } catch {
+            }
+        }
+    }
+    
+    func setupMapview() {
+        let camera = GMSCameraPosition.camera(withLatitude: 30.710650705761,
+                                              longitude: 76.69453899383237,
+                                              zoom: 20)
+        
+        self.googleView.camera = camera
+        self.googleView.delegate = self
+        self.googleView?.isMyLocationEnabled = true
+        self.googleView.settings.myLocationButton = true
+        self.googleView.settings.compassButton = true
+        self.googleView.settings.zoomGestures = true
+        
+        self.googleView.animate(to: camera)
+    }
+    
+    //MARK: - Api
+    func getloctionData()  {
+        ActivityIndicator.shared.show(self.view)
+        DataManager.postAPIWithParameters(urlString: API.getuserlocation, jsonString: Request.getlocationData(selectedShiftId, selectedDate,locationId) as [String : AnyObject], success: {
+            sucess in
+            ActivityIndicator.shared.hide()
+            self.setData(sucess)
+            
+        }, failure: {
+            fail in
+            ActivityIndicator.shared.hide()
+        })
+    }
+    
+    func setData(_ data:AnyObject) {
+        
+        if let items = data["data"] as? [[String:Any]] {
+            let tmp = items.map {ShiftUserLocation.init($0 as KeyValue)}
+            
+            lcoationArray =  tmp.sorted(by: { Double($0!.timestamp!)  > Double($1!.timestamp!)}) as! [ShiftUserLocation]
+            lcoationArray = lcoationArray.reversed()
+            
+            gameTimer  = Timer.scheduledTimer(timeInterval: trackingSpeed, target: self, selector: #selector(self.showTrack), userInfo: nil, repeats: true)
+ 
+        }
+        
+        if let item = data["locationArray"] as? [[String:Any]] {
+            if item.count != 0 {
+                locationData = shiftDetail.init(item[0] as KeyValue)
+                
+               
+                if locationData.radius == "" {
+                    guard (item[0]["data"] as? [NSDictionary]) != nil else {
+                        return
+                    }
+                    drawPolygon(googleView, locationData)
+                    
+                } else {
+                    getPinOnMap(map: googleView, lat: locationData.latitude!, long: locationData.longitude!, radius: locationData.radius!,addressLocation: locationData.address!)
+                    
+                }
+            }
+        }
+    }
+    
+    
+    //MARK:- Button actions
+    
+    @IBAction func playPauseButtonClicked(_ sender: UIButton) {
+        if sender.currentTitle == "Pause" {
+            if gameTimer!.isValid {
+                gameTimer?.invalidate()
+            }
+            playPauseBtnItem.buttonImage = UIImage(named: "play")
+            playPauseBtnItem.titleLabel.text = "Play"
+            sender.setTitle("Play", for: .normal)
+        } else {
+            playPauseBtnItem.buttonImage = UIImage(named: "pause")
+            playPauseBtnItem.titleLabel.text = "Pause"
+            sender.setTitle("Pause", for: .normal)
+            gameTimer = Timer.scheduledTimer(timeInterval: trackingSpeed, target: self, selector: #selector(self.showTrack), userInfo: nil, repeats: true)
+            
+        }
+        
+        
+    }
+    
+    
+    @IBAction func restartButtonClicked(_ sender: Any) {
+        indexValue = 0
+        if gameTimer!.isValid {
+            gameTimer?.invalidate()
+         }
+        
+        trackingSpeed = 0.5
+        googleView.clear()
+        inTimePolyline.map = nil
+        outTimePolyline.map = nil
+        inTimePath.removeAllCoordinates()
+        outTimePath.removeAllCoordinates()
+        speedButton.setBtnTitle("Speed:1.0x")
+        getloctionData()
+    }
+    
+    @IBAction func speedButtonClicked(_ sender: Any) {
+         self.openActionsheet()
+    }
+ 
+ 
+    func openActionsheet() {
+        UIAlertController.showActionSheet("Speed", cbTitle: "Cancel", dbTitle: nil, obTitles: ["1.0x","2.0x","3.0x","4.0x","5.0x"]) { (alert, index) in
+ 
+            switch index {
+            case 1:
+                self.speedButton.setBtnTitle("Speed:1.0x")
+                self.trackingSpeed = 0.5
+                self.changeTrackingSpeed()
+            case 2:
+                self.speedButton.setBtnTitle("Speed:2.0x")
+                self.trackingSpeed = 0.2
+                self.changeTrackingSpeed()
+            case 3:
+                self.speedButton.setBtnTitle("Speed:3.0x")
+                self.trackingSpeed = 0.1
+                self.changeTrackingSpeed()
+            case 4:
+                self.speedButton.setBtnTitle("Speed:4.0x")
+                self.trackingSpeed = 0.05
+                self.changeTrackingSpeed()
+            case 5:
+                self.speedButton.setBtnTitle("Speed:5.0x")
+                self.trackingSpeed = 0.01
+                self.changeTrackingSpeed()
+            default:
+                break
+            }
+        }
+     }
+    
+    func changeTrackingSpeed() {
+        if gameTimer!.isValid {
+            gameTimer?.invalidate()
+            gameTimer = Timer.scheduledTimer(timeInterval: trackingSpeed, target: self, selector: #selector(self.showTrack), userInfo: nil, repeats: true)
+            
+        }
+    }
+    
+    //MARK: - Adding polyline on map
+    @objc func showLiveTrack() {
+         if indexValue < lcoationArray.count {
+                    let lat:Double = Double("\(lcoationArray[indexValue].lat!)") ?? 0.0
+                    let long:Double =  Double("\(lcoationArray[indexValue].long!)") ?? 0.0
+                    var oldpositon = CLLocationCoordinate2DMake(lat,long)
+                    let position = CLLocationCoordinate2DMake(lat,long)
+                    
+                 
+                    let camera = GMSCameraPosition.camera(withLatitude:lat ,
+                                                          longitude:long ,
+                                                            zoom: 20)
+                      
+         
+                       self.googleView.animate(to: camera)
+                    
+                
+                    if allMarker.count != 0 {
+                        oldpositon = (allMarker.last?.position)!
+                        
+                    }
+                 
+                    //Create new marker
+                    marker.map = nil
+                    marker = GMSMarker(position: position)
+                    marker.title = "addressLocation"
+                    marker.map = googleView
+                    marker.snippet = (lcoationArray[indexValue].status!)
+                    marker.icon = UIImage.init(named: "default_marker")
+                   
+                    indexValue += 1
+                    
+                } else {
+                    self.gameTimer?.invalidate()
+                }
+        
+        
+    }
+    
+    
+    @objc func showTrack() {
+        if indexValue < lcoationArray.count {
+            let lat:Double = Double("\(lcoationArray[indexValue].lat!)") ?? 0.0
+            let long:Double =  Double("\(lcoationArray[indexValue].long!)") ?? 0.0
+            var oldpositon = CLLocationCoordinate2DMake(lat,long)
+            let position = CLLocationCoordinate2DMake(lat,long)
+            
+         
+            let camera = GMSCameraPosition.camera(withLatitude:lat ,
+                                                  longitude:long ,
+                                                    zoom: 16)
+              
+ 
+               self.googleView.animate(to: camera)
+            
+            
+            //Change all makers icon
+            //            for marker in allMarker {
+            //
+            //                if marker.snippet  == "inTime" {
+            //                    marker.icon = UIImage.init(named: "GreenLine")
+            //                } else {
+            //                    marker.icon = UIImage.init(named: "RedLine")
+            //                }
+            //                oldpositon = marker.position
+            //            }
+            
+            if allMarker.count != 0 {
+                oldpositon = (allMarker.last?.position)!
+                
+            }
+            //Rotate last maker
+            //            if allMarker.count != 0 {
+            //                let getAngle = self.angleFromCoordinate(oldpositon, position)
+            //                allMarker.last!.rotation = Double(getAngle) * (180.0 / Double.pi)
+            //            }
+            
+            //Create new marker
+            marker.map = nil
+            marker = GMSMarker(position: position)
+            marker.title = "addressLocation"
+            marker.map = googleView
+            marker.snippet = (lcoationArray[indexValue].status!)
+            
+            
+            //            let getAngle = self.angleFromCoordinate(oldpositon, position);
+            //            marker.rotation = Double(getAngle) * (180.0 / Double.pi);
+//            let makerView = UIView(frame: CGRect(x: 0, y: 0, width: 60, height: 60))
+//            let markerImageView = UIImageView(frame:  CGRect(x: 0, y: 0, width: 60, height: 40))
+//            markerImageView.image = UIImage.init(named: "checkTick")
+//            makerView.addSubview(markerImageView)
+//            let markerLabel = UILabel(frame:CGRect(x: 0, y: 40, width: 60, height: 20))
+//            markerLabel.text = "abcde"
+//            makerView.addSubview(markerLabel)
+
+            
+            marker.icon = UIImage.init(named: "default_marker")
+            //Add to all maker array
+            allMarker.append(marker)
+            
+            //Create polyline
+            if lcoationArray[indexValue].status!  == "inTime" {
+                if outTimePath.count() != 0 {
+                    inTimePath.add(oldpositon)
+                    inTimePolyline = GMSPolyline(path: inTimePath)
+                    outTimePath.removeAllCoordinates()
+                }
+                
+                inTimePath.add(position)
+                inTimePolyline.strokeWidth = 5.0
+                inTimePolyline.path = inTimePath
+                inTimePolyline.strokeColor = .green
+                
+                //             inTimePolyline.geodesic = true
+                inTimePolyline.map = googleView
+            } else {
+                if inTimePath.count() != 0 {
+                    outTimePath.add(oldpositon)
+                    outTimePolyline = GMSPolyline(path: outTimePath)
+                    inTimePath.removeAllCoordinates()
+                }
+                
+                outTimePath.add(position)
+                outTimePolyline.strokeWidth = 5.0
+                outTimePolyline.path = outTimePath
+                outTimePolyline.strokeColor = .red
+                //              outTimePolyline.geodesic = true
+                outTimePolyline.map = googleView
+                
+            }
+            indexValue += 1
+            
+        } else {
+            self.gameTimer?.invalidate()
+        }
+        
+    }
+    
+    func imageWithView(view: UIView) -> UIImage {
+        UIGraphicsBeginImageContextWithOptions(view.bounds.size, false, 0.0)
+        view.layer.render(in: UIGraphicsGetCurrentContext()!)
+        let image = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+        return image!
+    }
+}
+
+extension GMSPolygon {
+    
+    func contains(coordinate: CLLocationCoordinate2D) -> Bool {
+        
+        if self.path != nil {
+            if GMSGeometryContainsLocation(coordinate, self.path!, true) {
+                return true
+            }  else {
+                return false
+            }
+        } else {
+            return false
+        }
+    }
+}
+
